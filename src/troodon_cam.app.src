@@ -1,0 +1,12 @@
+{application, troodon_cam,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { troodon_cam_app, []}},
+  {env, []}
+ ]}.

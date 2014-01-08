@@ -1,0 +1,6 @@
+ebin
+*~
+.depsolver_plt
+priv
+*.o
+c_src/pru_camera_bin.h
