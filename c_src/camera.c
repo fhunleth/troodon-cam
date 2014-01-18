@@ -118,7 +118,7 @@ int main()
     for (i = 0; i < 10; i++) {
 	int event_count;
 	prussdrv_pru_wait_event(PRU_EVTOUT_1, &event_count);
-	prussdrv_pru_clear_event (PRU1_ARM_INTERRUPT);
+	prussdrv_pru_clear_event(PRU1_ARM_INTERRUPT, PRU_EVTOUT_1);
 
 	struct pru_camera_frame_header header = *state.frame_header;
 
