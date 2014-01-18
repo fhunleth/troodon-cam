@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 #include <err.h>
 
 // Driver header file
@@ -13,88 +13,129 @@
 
 #include "pru_camera_bin.h"
 
+#define DEBUG
+#ifdef DEBUG
+#define DEBUG_PRINTF(FORMAT, ...) fprintf(stderr, FORMAT, ## __VA_ARGS__)
+#else
+#define DEBUG_PRINTF(FORMAT, ...)
+#endif
+
 #define PRU_NUM 	 1
 #define PRUSS0_SHARED_DATARAM    4
 
-static int LOCAL_exampleInit ( );
-static unsigned short LOCAL_examplePassed ();
-
-static void *ddrMem, *sharedMem;
-static unsigned int *sharedMem_int;
-static unsigned int *ddrMem_int;
-
-int main()
+// See analogous data structures in pru_camera.p
+struct pru_camera_config
 {
-    fprintf(stderr, "Going to take a snapshot from the troodon-cam...\n");
+    uint32_t ddr;
+    uint32_t frame_size;
+};
 
-    /* Initialize the PRU */
+struct pru_camera_frame_header
+{
+    uint32_t id;
+    uint32_t frame_start;
+    uint32_t frame_end;
+};
+
+#define CAMERA_MAX_LINES   480
+#define CAMERA_MAX_COLUMNS 752
+#define CAMERA_FRAME_SIZE  (CAMERA_MAX_COLUMNS * CAMERA_MAX_LINES)
+
+// We'd like space for the frame header and two buffers
+#define DDR_MIN_SIZE (sizeof(struct pru_camera_frame_header) + 2 * CAMERA_FRAME_SIZE)
+
+struct camera_state
+{
+    // DDR memory addresses from prussdrv
+    // This is the large memory area where frames are stored
+    void *ddr;
+    unsigned int ddr_phys;
+    struct pru_camera_frame_header *frame_header;
+
+    // PRU shared memory
+    // This is the small shared memory where configuration is
+    // passed to the PRU program.
+    void *shared;
+    struct pru_camera_config *config;
+};
+
+static void camera_init(struct camera_state *state)
+{
+    // Initialize the PRU
     prussdrv_init();
 
-    /* Open PRU Interrupt */
+    // Open PRU Interrupt
     unsigned int ret = prussdrv_open(PRU_EVTOUT_1);
     if (ret)
 	errx(EXIT_FAILURE, "prussdrv_open: %d", ret);
 
-    /* Get the interrupt initialized */
+    // Get the interrupt initialized
     tpruss_intc_initdata pruss_intc_initdata = PRUSS_INTC_INITDATA;
     prussdrv_pruintc_init(&pruss_intc_initdata);
 
-    /* Initialize example */
-    fprintf(stderr, "\tINFO: Initializing example.\n");
-
-    LOCAL_exampleInit();
-
-    /* Execute example on PRU */
-    fprintf(stderr, "\tINFO: Executing example.\n");
-    prussdrv_pru_disable(PRU_NUM);
-    prussdrv_pru_write_memory(PRUSS0_PRU1_IRAM, 0, PRUcode, sizeof(PRUcode));
-    prussdrv_pru_enable(PRU_NUM);
-
-    /* Wait until PRU0 has finished execution */
-    fprintf(stderr, "\tINFO: Waiting for HALT command.\n");
-    prussdrv_pru_wait_event (PRU_EVTOUT_1);
-    fprintf(stderr, "\tINFO: PRU completed transfer.\n");
-    prussdrv_pru_clear_event (PRU1_ARM_INTERRUPT);
-
-    /* Check if example passed */
-    if ( LOCAL_examplePassed() )
-        fprintf(stderr, "Example executed successfully.\n");
-    else
-        fprintf(stderr, "Example failed.\n");
-
-    /* Disable PRU and close memory mapping*/
-    prussdrv_pru_disable(PRU_NUM);
-    prussdrv_exit ();
-
-    return(0);
-}
-
-/*****************************************************************************
-* Local Function Definitions                                                 *
-*****************************************************************************/
-
-#define DDR_MIN_SIZE (1024*1024)
-
-static int LOCAL_exampleInit()
-{
-    prussdrv_map_extmem(&ddrMem);
-
+    prussdrv_map_extmem(&state->ddr);
     if (prussdrv_extmem_size() < DDR_MIN_SIZE)
         errx(EXIT_FAILURE, "extmem_size not large enough. Check that uio_pruss.extram_pool_sz=0x%x or larger.", DDR_MIN_SIZE);
+    state->frame_header = (struct pru_camera_frame_header *) state->ddr;
+    state->ddr_phys = prussdrv_get_phys_addr(state->ddr);
+    memset(state->ddr, 0, DDR_MIN_SIZE);
 
-    ddrMem_int = (unsigned int*) ddrMem;
-    memset(ddrMem, 0, DDR_MIN_SIZE);
-
-    /* Allocate Shared PRU memory. */
-    prussdrv_map_prumem(PRUSS0_SHARED_DATARAM, &sharedMem);
-    sharedMem_int = (unsigned int*) sharedMem;
-
-    // Tell the PRU where the DDR buffer lives
-    sharedMem_int[0] = prussdrv_get_phys_addr(ddrMem);
-
-    return(0);
+    // Allocate Shared PRU memory.
+    prussdrv_map_prumem(PRUSS0_SHARED_DATARAM, &state->shared);
+    state->config = (struct pru_camera_config *) state->shared;
 }
 
+static void camera_start(struct camera_state *state)
+{
+    // Fill out the PRU program's configuration
+    state->config->ddr = state->ddr_phys;
+    state->config->frame_size = CAMERA_FRAME_SIZE;
+
+    DEBUG_PRINTF("Loading and running PRU code\n");
+    prussdrv_exec_code(PRU_NUM, PRUcode, sizeof(PRUcode), 0);
+}
+
+static void camera_close(struct camera_state *state)
+{
+    memset(state, 0, sizeof(*state));
+
+    // Disable PRU and close memory mapping
+    prussdrv_pru_disable(PRU_NUM);
+    prussdrv_exit ();
+}
+
+int main()
+{
+    DEBUG_PRINTF("Initializing troodon-cam...\n");
+
+    struct camera_state state;
+    camera_init(&state);
+
+    DEBUG_PRINTF("Starting troodon-cam...\n");
+    camera_start(&state);
+
+    int i;
+    for (i = 0; i < 10; i++) {
+	int event_count;
+	prussdrv_pru_wait_event(PRU_EVTOUT_1, &event_count);
+	prussdrv_pru_clear_event (PRU1_ARM_INTERRUPT);
+
+	struct pru_camera_frame_header header = *state.frame_header;
+
+	DEBUG_PRINTF("Got %d events. Header=%d, %08x, %08x (%d)\n",
+		     event_count,
+		     header.id,
+		     header.frame_start,
+		     header.frame_end,
+	             header.frame_end - header.frame_start);
+    }
+
+    camera_close(&state);
+
+    return 0;
+}
+
+#if 0
 static unsigned short LOCAL_examplePassed()
 {
     unsigned int pixel_count = ddrMem_int[0];
@@ -111,3 +152,4 @@ static unsigned short LOCAL_examplePassed()
 
     return 1;
 }
+#endif
