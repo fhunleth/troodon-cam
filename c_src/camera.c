@@ -31,6 +31,7 @@ struct pru_camera_config
 {
     uint32_t ddr;
     uint32_t frame_size;
+    uint32_t subsample;
 };
 
 struct pru_camera_frame_header
@@ -40,8 +41,16 @@ struct pru_camera_frame_header
     uint32_t frame_end;
 };
 
+#define CAMERA_SUBSAMPLE   1
+
+#if CAMERA_SUBSAMPLE == 0
 #define CAMERA_MAX_LINES   480
 #define CAMERA_MAX_COLUMNS 752
+#else
+#define CAMERA_MAX_LINES   240
+#define CAMERA_MAX_COLUMNS 376
+#endif
+
 #define CAMERA_FRAME_SIZE  (CAMERA_MAX_COLUMNS * CAMERA_MAX_LINES)
 
 // We'd like space for the frame header and two buffers
@@ -127,6 +136,7 @@ static void camera_start(struct camera_state *state)
     // Fill out the PRU program's configuration
     state->config->ddr = state->ddr_phys;
     state->config->frame_size = CAMERA_FRAME_SIZE;
+    state->config->subsample = CAMERA_SUBSAMPLE;
 
     DEBUG_PRINTF("Loading and running PRU code\n");
     prussdrv_exec_code(PRU_NUM, PRUcode, sizeof(PRUcode), 0);
@@ -135,7 +145,8 @@ static void camera_start(struct camera_state *state)
 static void camera_process(struct camera_state *state)
 {
     int event_count;
-// TODO: Need to read enough to always be ahead or we might duplicate frames.
+
+    // Clear the event
     prussdrv_pru_wait_event(PRU_EVTOUT_1, &event_count);
     prussdrv_pru_clear_event(PRU1_ARM_INTERRUPT, PRU_EVTOUT_1);
 
@@ -157,7 +168,6 @@ static void camera_process(struct camera_state *state)
 	return;
     }
 
-#if 1
     // Initialize/reinitialize the output buffer
     state->jpeg_outsize = JPEG_BUFFER_SIZE;
     jpeg_mem_dest(&state->cinfo, &state->jpeg_out, &state->jpeg_outsize);
@@ -180,7 +190,6 @@ static void camera_process(struct camera_state *state)
 		 (int) tp2.tv_nsec,
 		 (int) state->jpeg_outsize,
 		 (int) (tp2.tv_nsec - tp.tv_nsec));
-#endif
 }
 
 /*
@@ -313,6 +322,12 @@ int main()
 	if (fdset[1].revents & (POLLIN | POLLHUP))
 	    erlcmd_process(&handler, &camera);
     }
+
+    // See how long camera_process takes if the PRU isn't running.
+    usleep(100000);
+    DEBUG_PRINTF("PRU off\n");
+    prussdrv_pru_disable(PRU_NUM);
+    camera_process(&camera);
 
     camera_close(&camera);
 
