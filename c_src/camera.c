@@ -8,6 +8,7 @@
 #include <err.h>
 #include <jpeglib.h>
 #include <time.h>
+#include <arpa/inet.h>
 
 // Driver header file
 #include "prussdrv.h"
@@ -16,7 +17,7 @@
 #include "pru_camera_bin.h"
 
 
-#define DEBUG
+//#define DEBUG
 #ifdef DEBUG
 #define DEBUG_PRINTF(FORMAT, ...) fprintf(stderr, FORMAT, ## __VA_ARGS__)
 #else
@@ -183,6 +184,9 @@ static void camera_process(struct camera_state *state)
     }
     jpeg_finish_compress(&state->cinfo);
 
+    uint16_t be_len = htons(state->jpeg_outsize);
+    fwrite(&be_len, 1, 2, stdout);
+    fwrite(state->jpeg_out, 1, state->jpeg_outsize, stdout);
     struct timespec tp2;
     clock_gettime(CLOCK_MONOTONIC, &tp2);
     DEBUG_PRINTF("%d.%09d: JPEG size is %d: 0.%09d s \n",
@@ -295,8 +299,7 @@ int main()
     camera_start(&camera);
     int pru_fd = prussdrv_pru_event_fd(PRU_EVTOUT_1);
 
-    int i;
-    for (i = 0; i < 10; i++) {
+    for (;;) {
 	struct pollfd fdset[2];
 
 	fdset[0].fd = pru_fd;
@@ -323,11 +326,13 @@ int main()
 	    erlcmd_process(&handler, &camera);
     }
 
+#if 0
     // See how long camera_process takes if the PRU isn't running.
     usleep(100000);
     DEBUG_PRINTF("PRU off\n");
     prussdrv_pru_disable(PRU_NUM);
     camera_process(&camera);
+#endif
 
     camera_close(&camera);
 
