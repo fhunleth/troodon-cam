@@ -4,6 +4,7 @@
 
 %% API
 -export([start_link/0,
+	 stop/0,
 	 get_next_picture/0]).
 
 %% gen_server callbacks
@@ -25,6 +26,9 @@
                     {ok, pid()} | ignore | {error, _}.
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+stop() ->
+    gen_server:call(?SERVER, stop).
 
 get_next_picture() ->
     gen_server:call(?SERVER, get_next_picture).
@@ -57,8 +61,11 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call(get_next_picture, From, #state{pending=Pending} = State) ->
-  NewPending = [From | Pending],
-  {noreply,  State#state{pending=NewPending}}.
+    NewPending = [From | Pending],
+    {noreply,  State#state{pending=NewPending}};
+handle_call(stop, _From, #state{port=Port}=State) ->
+    send_to_port(Port, {exit}),
+    {stop, normal, ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -122,3 +129,5 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+send_to_port(Port, Msg) ->
+    Port ! {self(), {command, term_to_binary(Msg)}}.

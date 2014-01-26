@@ -1,6 +1,7 @@
+%% -*- mode: Erlang; fill-column: 80; comment-column: 75; -*-
 {application, troodon_cam,
  [
-  {description, ""},
+  {description, "Troodon camera interface through the AM335x PRU"},
   {vsn, "1"},
   {registered, []},
   {applications, [

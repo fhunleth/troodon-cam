@@ -15,7 +15,7 @@
 #include <pruss_intc_mapping.h>
 
 #include "pru_camera_bin.h"
-
+#include "erlcmd.h"
 
 //#define DEBUG
 #ifdef DEBUG
@@ -77,6 +77,9 @@ struct camera_state
     struct jpeg_error_mgr jerr;
     unsigned char *jpeg_out;
     unsigned long jpeg_outsize;
+
+    // Exit
+    int done;
 };
 
 static void camera_init(struct camera_state *state)
@@ -154,6 +157,7 @@ static void camera_process(struct camera_state *state)
     // Copy the frame header
     struct pru_camera_frame_header header = *state->frame_header;
 
+#if 0
     struct timespec tp;
     clock_gettime(CLOCK_MONOTONIC, &tp);
     DEBUG_PRINTF("%d.%09d: Header=%d, %08x, %08x (%d)\n",
@@ -163,6 +167,7 @@ static void camera_process(struct camera_state *state)
 		 header.frame_start,
 		 header.frame_end,
 		 header.frame_end - header.frame_start);
+#endif
 
     if (header.frame_end - header.frame_start != CAMERA_FRAME_SIZE) {
 	DEBUG_PRINTF("Received bad frame: %d bytes\n", header.frame_end - header.frame_start);
@@ -187,6 +192,7 @@ static void camera_process(struct camera_state *state)
     uint16_t be_len = htons(state->jpeg_outsize);
     fwrite(&be_len, 1, 2, stdout);
     fwrite(state->jpeg_out, 1, state->jpeg_outsize, stdout);
+#if 0
     struct timespec tp2;
     clock_gettime(CLOCK_MONOTONIC, &tp2);
     DEBUG_PRINTF("%d.%09d: JPEG size is %d: 0.%09d s \n",
@@ -194,112 +200,38 @@ static void camera_process(struct camera_state *state)
 		 (int) tp2.tv_nsec,
 		 (int) state->jpeg_outsize,
 		 (int) (tp2.tv_nsec - tp.tv_nsec));
-}
-
-/*
- * Erlang request/response processing
- */
-#define BUF_SIZE 1024
-struct erlcmd
-{
-    unsigned char buffer[BUF_SIZE];
-    ssize_t index;
-};
-
-//void erlcmd_send(ETERM *response);
-
-/**
- * Initialize an Erlang command handler.
- *
- * @param handler the structure to initialize
- */
-void erlcmd_init(struct erlcmd *handler)
-{
-    memset(handler, 0, sizeof(*handler));
-}
-
-#if 0
-/**
- * @brief Synchronously send a response back to Erlang
- *
- * @param response what to send back
- */
-void erlcmd_send(ETERM *response)
-{
-    unsigned char buf[1024];
-
-    if (erl_encode(response, buf + sizeof(uint16_t)) == 0)
-	errx(EXIT_FAILURE, "erl_encode");
-
-    ssize_t len = erl_term_len(response);
-    uint16_t be_len = htons(len);
-    memcpy(buf, &be_len, sizeof(be_len));
-
-    len += sizeof(uint16_t);
-    ssize_t wrote = 0;
-    do {
-	ssize_t amount_written = write(STDOUT_FILENO, buf + wrote, len - wrote);
-	if (amount_written < 0) {
-	    if (errno == EINTR)
-		continue;
-
-	    err(EXIT_FAILURE, "write");
-	}
-
-	wrote += amount_written;
-    } while (wrote < len);
-}
 #endif
+}
 
-/**
- * @brief call to process any new requests from Erlang
- */
-void erlcmd_process(struct erlcmd *handler, struct camera_state *camera)
+static void camera_handle_request(ETERM *emsg, void *cookie)
 {
-    ssize_t amount_read = read(STDIN_FILENO, handler->buffer, sizeof(handler->buffer) - handler->index);
-    if (amount_read < 0) {
-	/* EINTR is ok to get, since we were interrupted by a signal. */
-	if (errno == EINTR)
-	    return;
+    struct camera_state *state = (struct camera_state *) cookie;
 
-	/* Everything else is unexpected. */
-	err(EXIT_FAILURE, "read");
-    } else if (amount_read == 0) {
-	/* EOF. Erlang process was terminated. This happens after a
-	   release or if there was an error. */
-	exit(EXIT_SUCCESS);
+    ETERM *emsg_type = erl_element(1, emsg);
+    if (emsg_type == NULL)
+	errx(EXIT_FAILURE, "erl_element(emsg_type)");
+
+    if (strcmp(ERL_ATOM_PTR(emsg_type), "exit") == 0) {
+	state->done = 1;
+    } else {
+	errx(EXIT_FAILURE, "unexpected request %s", ERL_ATOM_PTR(emsg_type));
     }
 
-    handler->index += amount_read;
-    for (;;) {
-	ssize_t bytes_processed = 0; // TODO erlcmd_dispatch(handler, can);
-	if (bytes_processed == 0) {
-	    /* Only have part of the command to process. */
-	    break;
-	} else if (handler->index > bytes_processed) {
-	    /* Processed the command and there's more data. */
-	    memmove(handler->buffer, &handler->buffer[bytes_processed], handler->index - bytes_processed);
-	    handler->index -= bytes_processed;
-	} else {
-	    /* Processed the whole buffer. */
-	    handler->index = 0;
-	    break;
-	}
-    }
+    erl_free_term(emsg_type);
 }
 
 int main()
 {
     struct camera_state camera;
-    struct erlcmd handler;
-
-    erlcmd_init(&handler);
     camera_init(&camera);
+
+    struct erlcmd handler;
+    erlcmd_init(&handler, camera_handle_request, &camera);
 
     camera_start(&camera);
     int pru_fd = prussdrv_pru_event_fd(PRU_EVTOUT_1);
 
-    for (;;) {
+    while (!camera.done) {
 	struct pollfd fdset[2];
 
 	fdset[0].fd = pru_fd;
@@ -310,7 +242,7 @@ int main()
 	fdset[1].events = POLLIN;
 	fdset[1].revents = 0;
 
-	int rc = poll(fdset, 1, -1);
+	int rc = poll(fdset, 2, -1);
 	if (rc < 0) {
 	    /* Retry if EINTR */
 	    if (errno == EINTR)
@@ -323,37 +255,10 @@ int main()
 	    camera_process(&camera);
 
 	if (fdset[1].revents & (POLLIN | POLLHUP))
-	    erlcmd_process(&handler, &camera);
+	    erlcmd_process(&handler);
     }
-
-#if 0
-    // See how long camera_process takes if the PRU isn't running.
-    usleep(100000);
-    DEBUG_PRINTF("PRU off\n");
-    prussdrv_pru_disable(PRU_NUM);
-    camera_process(&camera);
-#endif
 
     camera_close(&camera);
 
     return 0;
 }
-
-#if 0
-static unsigned short LOCAL_examplePassed()
-{
-    unsigned int pixel_count = ddrMem_int[0];
-    unsigned int line_count = ddrMem_int[1];
-
-    fprintf(stderr, "pixel_count=%d, line_count=%d\n", pixel_count, line_count);
-    if (pixel_count != 360960 || line_count != 480)
-        return 0;
-
-    FILE *fp = fopen("/tmp/output.pgm", "wb");
-    fprintf(fp, "P5\n%d %d 255\n", pixel_count / line_count, line_count);
-    fwrite(&ddrMem_int[3], 1, pixel_count, fp);
-    fclose(fp);
-
-    return 1;
-}
-#endif
