@@ -143,16 +143,14 @@ static void camera_start(struct camera_state *state)
     state->config->subsample = CAMERA_SUBSAMPLE;
 
     DEBUG_PRINTF("Loading and running PRU code\n");
-    prussdrv_exec_code(PRU_NUM, PRUcode, sizeof(PRUcode), 0);
+    prussdrv_exec_code(PRU_NUM, PRUcode, sizeof(PRUcode));
 }
 
 static void camera_process(struct camera_state *state)
 {
-    int event_count;
-
     // Clear the event
-    prussdrv_pru_wait_event(PRU_EVTOUT_1, &event_count);
-    prussdrv_pru_clear_event(PRU1_ARM_INTERRUPT, PRU_EVTOUT_1);
+    prussdrv_pru_wait_event(PRU_EVTOUT_1);
+    prussdrv_pru_clear_event(PRU_EVTOUT_1, PRU1_ARM_INTERRUPT);
 
     // Copy the frame header
     struct pru_camera_frame_header header = *state->frame_header;
