@@ -39,7 +39,7 @@ get_next_picture() ->
 
 init([]) ->
     PortPath = code:priv_dir(troodon_cam) ++ "/troodon_cam",
-    Port = erlang:open_port({spawn, PortPath}, [{packet, 2}, binary]),
+    Port = erlang:open_port({spawn, PortPath}, [{packet, 2}, binary, exit_status]),
     State = #state{port=Port},
 
     % Take the imager out of reset
@@ -64,8 +64,9 @@ handle_call(get_next_picture, From, #state{pending=Pending} = State) ->
     NewPending = [From | Pending],
     {noreply,  State#state{pending=NewPending}};
 handle_call(stop, _From, #state{port=Port}=State) ->
-    send_to_port(Port, {exit}),
-    {stop, normal, ok, State}.
+    Port ! {self(), close},
+    {reply, ok, State}.
+%    {stop, normal, ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -95,6 +96,9 @@ handle_info({Port, {data, RawMsg}}, #state{port=Port,pending=Pending}=State) ->
     %io:format("Got frame: ~p bytes~n", [byte_size(RawMsg)]),
     [ gen_server:reply(To, RawMsg) || To <- Pending ],
     {noreply, State#state{pending=[]}};
+handle_info({Port, {exit_status, Status}}, #state{port=Port}=State) ->
+    io:format("Port exited with status ~p~n", [Status]),
+    {stop, port_crashed, State};
 handle_info(Info, State) ->
     io:format("Got unexpected message: ~p~n", [Info]),
     {noreply, State}.
@@ -129,5 +133,3 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-send_to_port(Port, Msg) ->
-    Port ! {self(), {command, term_to_binary(Msg)}}.
