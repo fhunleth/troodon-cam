@@ -17,6 +17,7 @@
 #include "pru_camera_bin.h"
 #include "erlcmd.h"
 
+//#define VERBOSE_JPEG
 //#define DEBUG
 #ifdef DEBUG
 #define DEBUG_PRINTF(FORMAT, ...) fprintf(stderr, FORMAT, ## __VA_ARGS__)
@@ -155,16 +156,9 @@ static void camera_process(struct camera_state *state)
     // Copy the frame header
     struct pru_camera_frame_header header = *state->frame_header;
 
-#if 0
+#ifdef VERBOSE_JPEG
     struct timespec tp;
     clock_gettime(CLOCK_MONOTONIC, &tp);
-    DEBUG_PRINTF("%d.%09d: Header=%d, %08x, %08x (%d)\n",
-		 (int) tp.tv_sec,
-		 (int) tp.tv_nsec,
-		 header.id,
-		 header.frame_start,
-		 header.frame_end,
-		 header.frame_end - header.frame_start);
 #endif
 
     if (header.frame_end - header.frame_start != CAMERA_FRAME_SIZE) {
@@ -187,18 +181,31 @@ static void camera_process(struct camera_state *state)
     }
     jpeg_finish_compress(&state->cinfo);
 
-    uint16_t be_len = htons(state->jpeg_outsize);
-    fwrite(&be_len, 1, 2, stdout);
-    fwrite(state->jpeg_out, 1, state->jpeg_outsize, stdout);
-#if 0
-    struct timespec tp2;
-    clock_gettime(CLOCK_MONOTONIC, &tp2);
-    DEBUG_PRINTF("%d.%09d: JPEG size is %d: 0.%09d s \n",
-		 (int) tp2.tv_sec,
-		 (int) tp2.tv_nsec,
-		 (int) state->jpeg_outsize,
-		 (int) (tp2.tv_nsec - tp.tv_nsec));
+#ifdef VERBOSE_JPEG
+    {
+	struct timespec tp2;
+	static struct timespec previous_tp;
+
+	clock_gettime(CLOCK_MONOTONIC, &tp2);
+	int encode_delta = (int) (tp2.tv_nsec - tp.tv_nsec);
+	if (encode_delta < 0)
+	    encode_delta += 1000000000;
+	int previous_delta = (int) (tp.tv_nsec - previous_tp.tv_nsec);
+	if (previous_delta < 0)
+	    previous_delta += 1000000000;
+	fprintf(stderr, "%d: %d.%09d (0.%09d) JPEG len=%d, encode time=0.%09d s\r\n",
+		header.id,
+		(int) tp.tv_sec,
+		(int) tp.tv_nsec,
+		previous_delta,
+		(int) state->jpeg_outsize,
+		encode_delta);
+	previous_tp = tp;
+    }
 #endif
+    uint16_t be_len = htons(state->jpeg_outsize);
+    write(STDOUT_FILENO, &be_len, 2);
+    write(STDOUT_FILENO, state->jpeg_out, state->jpeg_outsize);
 }
 
 static void camera_handle_request(ETERM *emsg, void *cookie)
